@@ -90,5 +90,35 @@ def list_leads():
     leads = Lead.query.order_by(Lead.fecha_recepcion.desc()).all()
     return jsonify([lead.to_dict() for lead in leads]), 200
 
+from sqlalchemy import or_
+
+# Endpoint de búsqueda flexible
+@app.route("/leads/search", methods=["GET"])
+def search_leads():
+    nombre = request.args.get("nombre")
+    telefono = request.args.get("telefono")
+    email = request.args.get("email")
+    id_evento = request.args.get("id_evento")
+
+    query = Lead.query
+
+    if id_evento:
+        query = query.filter(Lead.id_evento == id_evento)
+    if nombre:
+        query = query.filter(Lead.nombre_cliente.ilike(f"%{nombre}%"))
+    if telefono:
+        query = query.filter(Lead.telefono.ilike(f"%{telefono}%"))
+    if email:
+        query = query.filter(Lead.email.ilike(f"%{email}%"))
+
+    results = query.order_by(Lead.fecha_recepcion.desc()).all()
+
+    if not results:
+        return jsonify({"msg": "No se encontraron leads con esos criterios"}), 404
+
+    return jsonify([lead.to_dict() for lead in results]), 200
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
