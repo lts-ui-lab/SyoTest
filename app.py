@@ -1,41 +1,94 @@
+import json
 from flask import Flask, request, jsonify
-import os
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
 
 app = Flask(__name__)
 
+# Configuración de SQLite (archivo local en Render)
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///leads.db"
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+db = SQLAlchemy(app)
+
+# Modelo de Lead
+class Lead(db.Model):
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    id_evento = db.Column(db.Integer, nullable=False)
+    nombre_cliente = db.Column(db.String(255))
+    email = db.Column(db.String(255))
+    telefono = db.Column(db.String(50))
+    event_group = db.Column(db.String(50))
+    event_type = db.Column(db.String(50))
+    comentario = db.Column(db.Text)
+    fecha_recepcion = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "id_evento": self.id_evento,
+            "nombre_cliente": self.nombre_cliente,
+            "email": self.email,
+            "telefono": self.telefono,
+            "event_group": self.event_group,
+            "event_type": self.event_type,
+            "comentario": self.comentario,
+            "fecha_recepcion": self.fecha_recepcion.isoformat()
+        }
+
+# Inicializar DB
+with app.app_context():
+    db.create_all()
+
+# Endpoint para recibir leads
 @app.route("/webhook/syonet/lead", methods=["POST"])
 def receive_lead():
     try:
-        # Intentar JSON primero
-        data = request.get_json(silent=True)
+        data = request.get_json()
 
-        if data is None:
-            # Si no hay JSON, intentar leer form-data o raw body
-            data = request.form.to_dict()  # si envían x-www-form-urlencoded
-            if not data:
-                # Si no hay form-data, leer el body crudo
-                raw = request.data.decode('utf-8')
-                return jsonify({
-                    "msg": "Datos recibidos pero no eran JSON ni form-data",
-                    "raw_data": raw
-                }), 400
+        # Caso: JSON anidado en clave
+        if isinstance(data, dict) and len(data) == 1:
+            raw_json = list(data.keys())[0]
+            lead_data = json.loads(raw_json)
+        else:
+            lead_data = data
 
-        print("Lead recibido:", data)
+        print("Lead procesado:", lead_data)
+
+        # Extraer datos importantes
+        id_evento = lead_data.get("idEvento")
+        cliente = lead_data.get("cliente", {})
+        evento = lead_data.get("event", {})
+
+        nuevo_lead = Lead(
+            id_evento=id_evento,
+            nombre_cliente=cliente.get("nome"),
+            email=cliente.get("email"),
+            telefono=cliente.get("ddiCel"),
+            event_group=evento.get("eventGroup"),
+            event_type=evento.get("eventType"),
+            comentario=evento.get("comment")
+        )
+
+        db.session.add(nuevo_lead)
+        db.session.commit()
+
         return jsonify({
-            "msg": "Lead recibido correctamente",
-            "lead": data
+            "msg": "Lead recibido y almacenado correctamente",
+            "lead": nuevo_lead.to_dict()
         }), 200
 
     except Exception as e:
-        import traceback
-        traceback_str = traceback.format_exc()
-        print("Error al procesar el lead:", traceback_str)
         return jsonify({
             "msg": "Error al procesar el lead",
-            "error": str(e),
-            "traceback": traceback_str
+            "error": str(e)
         }), 500
 
+# Endpoint para consultar todos los leads
+@app.route("/leads", methods=["GET"])
+def list_leads():
+    leads = Lead.query.order_by(Lead.fecha_recepcion.desc()).all()
+    return jsonify([lead.to_dict() for lead in leads]), 200
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
