@@ -27,9 +27,9 @@ AUTH_HEADER = {
 }
 
 # Configuración Twilio
-TWILIO_SID = os.getenv("TWILIO_SID", "TU_TWILIO_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "TU_TWILIO_TOKEN")
-TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "+1234567890")
+TWILIO_SID = os.getenv("TWILIO_SID", "ACcf61098091aa930787fba3203ba2585e")
+TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "9d7e8d892451ba6d9983cee88fd7ee31")
+TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "+15304288284")
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 
 # Modelo Lead
@@ -162,3 +162,4 @@ def receive_lead():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
