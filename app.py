@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
+from twilio.rest import Client
 
 app = Flask(__name__)
 
@@ -14,7 +15,7 @@ app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///leads.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
-# Credenciales Syonet desde variables de entorno
+# Configuración Syonet
 SYONET_BASE = os.getenv("SYONET_BASE", "https://demomex.syonet.com/api")
 SYONET_USER = os.getenv("SYONET_USER", "RODRIGO.SANTIAGO")
 SYONET_PASS = os.getenv("SYONET_PASS", "Syonet01#")
@@ -24,6 +25,12 @@ AUTH_HEADER = {
     "Content-Type": "application/json",
     "Authorization": f"Basic {auth}"
 }
+
+# Configuración Twilio
+TWILIO_SID = os.getenv("TWILIO_SID", "TU_TWILIO_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "TU_TWILIO_TOKEN")
+TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "+1234567890")
+twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
 
 # Modelo Lead
 class Lead(db.Model):
@@ -53,6 +60,18 @@ class Lead(db.Model):
 # Inicializar DB
 with app.app_context():
     db.create_all()
+
+# Función para llamar al lead vía Twilio
+def llamar_lead(numero_telefono, mensaje="Hola, esta es una confirmación de tu cita."):
+    try:
+        call = twilio_client.calls.create(
+            to=numero_telefono,
+            from_=TWILIO_NUMBER,
+            twiml=f'<Response><Say>{mensaje}</Say></Response>'
+        )
+        return {"status": "ok", "sid": call.sid}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 # Webhook para recibir leads
 @app.route("/webhook/syonet/lead", methods=["POST"])
@@ -103,6 +122,7 @@ def receive_lead():
             "testDrive": False
         }
 
+        # Llamada a la API de Syonet
         try:
             r = requests.post(
                 f"{SYONET_BASE}/evento/{id_evento}/acao",
@@ -117,10 +137,20 @@ def receive_lead():
         except requests.RequestException as e:
             syonet_response = {"error": str(e)}
 
+        # Llamada al lead vía Twilio (opcional)
+        if nuevo_lead.telefono:
+            resultado_llamada = llamar_lead(
+                nuevo_lead.telefono,
+                mensaje=f"Hola {nuevo_lead.nombre_cliente}, tu cita ha sido agendada para mañana a las 10:00."
+            )
+        else:
+            resultado_llamada = {"status": "no_number"}
+
         return jsonify({
-            "msg": "Lead recibido, almacenado y cita agendada",
+            "msg": "Lead recibido, almacenado, cita agendada y llamada realizada",
             "lead": nuevo_lead.to_dict(),
-            "syonet_response": syonet_response
+            "syonet_response": syonet_response,
+            "llamada": resultado_llamada
         }), 200
 
     except Exception as e:
