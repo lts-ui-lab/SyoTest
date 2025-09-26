@@ -1,15 +1,28 @@
 import json
+import time
+import requests
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
+from sqlalchemy import or_
 
 app = Flask(__name__)
 
-# Configuración de SQLite (archivo local en Render)
+# Configuración de SQLite (Render)
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///leads.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
 db = SQLAlchemy(app)
+
+# Configuración Syonet
+SYONET_BASE = "https://demomex.syonet.com/api"
+   # Credenciales de Syonet
+        usuario = "RODRIGO.SANTIAGO"
+        password = "Syonet01#"
+        auth = base64.b64encode(f"{usuario}:{password}".encode()).decode()
+AUTH_HEADER = {
+    "Content-Type": "application/json",
+    "Authorization": "Basic " + auth
+}
 
 # Modelo de Lead
 class Lead(db.Model):
@@ -40,7 +53,7 @@ class Lead(db.Model):
 with app.app_context():
     db.create_all()
 
-# Endpoint para recibir leads
+# Webhook para recibir leads desde Syonet
 @app.route("/webhook/syonet/lead", methods=["POST"])
 def receive_lead():
     try:
@@ -62,9 +75,9 @@ def receive_lead():
 
         nuevo_lead = Lead(
             id_evento=id_evento,
-            nombre_cliente=cliente.get("nome"),
+            nombre_cliente=cliente.get("nome") or cliente.get("name"),
             email=cliente.get("email"),
-            telefono=cliente.get("ddiCel"),
+            telefono=cliente.get("ddiCel") or cliente.get("telefone"),
             event_group=evento.get("eventGroup"),
             event_type=evento.get("eventType"),
             comentario=evento.get("comment")
@@ -73,9 +86,28 @@ def receive_lead():
         db.session.add(nuevo_lead)
         db.session.commit()
 
+        # Programar cita automáticamente (ejemplo: mañana a las 10:00)
+        fecha_cita = int(time.mktime(datetime.strptime(
+            "2025-09-30 10:00", "%Y-%m-%d %H:%M").timetuple()) * 1000)
+
+        payload = {
+            "tipo": "VISITA LOJA",
+            "resultado": "AGENDADA",
+            "conclusao": f"Cita programada para {nuevo_lead.nombre_cliente}",
+            "dataHoraAcao": fecha_cita,
+            "testDrive": False
+        }
+
+        r = requests.post(
+            f"{SYONET_BASE}/evento/{id_evento}/acao",
+            headers=AUTH_HEADER,
+            json=payload
+        )
+
         return jsonify({
-            "msg": "Lead recibido y almacenado correctamente",
-            "lead": nuevo_lead.to_dict()
+            "msg": "Lead recibido, almacenado y cita agendada",
+            "lead": nuevo_lead.to_dict(),
+            "syonet_response": r.json()
         }), 200
 
     except Exception as e:
@@ -84,13 +116,11 @@ def receive_lead():
             "error": str(e)
         }), 500
 
-# Endpoint para consultar todos los leads
+# Endpoint para listar leads
 @app.route("/leads", methods=["GET"])
 def list_leads():
     leads = Lead.query.order_by(Lead.fecha_recepcion.desc()).all()
     return jsonify([lead.to_dict() for lead in leads]), 200
-
-from sqlalchemy import or_
 
 # Endpoint de búsqueda flexible
 @app.route("/leads/search", methods=["GET"])
@@ -118,7 +148,5 @@ def search_leads():
 
     return jsonify([lead.to_dict() for lead in results]), 200
 
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
