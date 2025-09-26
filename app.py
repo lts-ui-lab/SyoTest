@@ -64,13 +64,16 @@ with app.app_context():
 # Función para llamar al lead vía Twilio
 def llamar_lead(numero_telefono, mensaje="Hola, esta es una confirmación de tu cita."):
     try:
+        print(f"Intentando llamar a: {numero_telefono}")
         call = twilio_client.calls.create(
             to=numero_telefono,
             from_=TWILIO_NUMBER,
             twiml=f'<Response><Say>{mensaje}</Say></Response>'
         )
+        print(f"Llamada realizada con SID: {call.sid}")
         return {"status": "ok", "sid": call.sid}
     except Exception as e:
+        print(f"Error al llamar: {str(e)}")
         return {"status": "error", "error": str(e)}
 
 # Webhook para recibir leads
@@ -86,7 +89,7 @@ def receive_lead():
                 raw_json = list(data.keys())[0]
                 lead_data = json.loads(raw_json)
             except Exception:
-                lead_data = data  # fallback si no es JSON válido
+                lead_data = data
 
         print("Lead recibido:", lead_data)
 
@@ -98,17 +101,33 @@ def receive_lead():
         telefono_formateado = None
 
         if telefonos:
-           tel_obj = telefonos[0]  # toma el primer teléfono
-           ddi = tel_obj.get("ddi", "")
-           numero = tel_obj.get("numero", "")
-           if ddi and numero:
-              telefono_formateado = f"+{ddi}{numero}"
-        
+            tel_obj = telefonos[0]
+            ddi = tel_obj.get("ddi", "")
+            numero = tel_obj.get("numero", "")
+            if ddi and numero:
+                telefono_formateado = f"+{ddi}{numero}"
+
+        if not telefono_formateado:
+            return jsonify({"msg": "No se proporcionó un teléfono válido"}), 400
+
+        # Llamada al lead vía Twilio **antes de agendar**
+        resultado_llamada = llamar_lead(
+            telefono_formateado,
+            mensaje=f"Hola {cliente.get('nome') or cliente.get('name')}, tu cita será agendada mañana a las 10:00."
+        )
+
+        if resultado_llamada.get("status") != "ok":
+            return jsonify({
+                "msg": "No se pudo realizar la llamada, no se agendó la cita",
+                "error": resultado_llamada.get("error")
+            }), 500
+
+        # Guardar lead solo si la llamada fue exitosa
         nuevo_lead = Lead(
             id_evento=id_evento,
             nombre_cliente=cliente.get("nome") or cliente.get("name"),
             email=cliente.get("email"),
-            telefono=telefono_formateado,  # <--- aquí se asigna el teléfono correcto
+            telefono=telefono_formateado,
             event_group=evento.get("eventGroup"),
             event_type=evento.get("eventType"),
             comentario=evento.get("comment")
@@ -146,17 +165,8 @@ def receive_lead():
         except requests.RequestException as e:
             syonet_response = {"error": str(e)}
 
-        # Llamada al lead vía Twilio (opcional)
-        if nuevo_lead.telefono:
-            resultado_llamada = llamar_lead(
-                nuevo_lead.telefono,
-                mensaje=f"Hola {nuevo_lead.nombre_cliente}, tu cita ha sido agendada para mañana a las 10:00."
-            )
-        else:
-            resultado_llamada = {"status": "no_number"}
-
         return jsonify({
-            "msg": "Lead recibido, almacenado, cita agendada y llamada realizada",
+            "msg": "Lead recibido, llamada exitosa y cita agendada",
             "lead": nuevo_lead.to_dict(),
             "syonet_response": syonet_response,
             "llamada": resultado_llamada
@@ -171,5 +181,3 @@ def receive_lead():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
