@@ -4,5 +4,6 @@ sqlalchemy
 flask_sqlalchemy
 requests
 python-dateutil
+twilio
 
 
