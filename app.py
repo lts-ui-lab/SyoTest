@@ -81,6 +81,7 @@ def llamar_lead(numero_telefono, mensaje="Hola, esta es una confirmación de tu 
 def receive_lead():
     try:
         data = request.get_json(force=True)
+        print("Lead recibido crudo:", data)
 
         # Manejo de JSON anidado
         lead_data = data
@@ -91,15 +92,23 @@ def receive_lead():
             except Exception:
                 lead_data = data
 
-        print("Lead recibido:", lead_data)
+        # Extraer cliente y evento desde resumoLead si existe
+        resumo_lead_str = lead_data.get("resumoLead")
+        if resumo_lead_str:
+            try:
+                resumo_lead = json.loads(resumo_lead_str)
+                cliente_data = resumo_lead.get("customer", {})
+                evento_data = resumo_lead.get("event", {})
+            except Exception:
+                cliente_data = {}
+                evento_data = {}
+        else:
+            cliente_data = lead_data.get("cliente", {})
+            evento_data = lead_data.get("event", {})
 
-        # Extraer datos importantes
-        id_evento = lead_data.get("idEvento")
-        cliente = lead_data.get("cliente", {})
-        evento = lead_data.get("event", {})
-        telefonos = cliente.get("phones", [])
+        # Extraer teléfono
+        telefonos = cliente_data.get("phones", [])
         telefono_formateado = None
-
         if telefonos:
             tel_obj = telefonos[0]
             ddi = tel_obj.get("ddi", "")
@@ -113,7 +122,7 @@ def receive_lead():
         # Llamada al lead vía Twilio **antes de agendar**
         resultado_llamada = llamar_lead(
             telefono_formateado,
-            mensaje=f"Hola {cliente.get('nome') or cliente.get('name')}, tu cita será agendada mañana a las 10:00."
+            mensaje=f"Hola {cliente_data.get('nome') or cliente_data.get('name')}, tu cita será agendada mañana a las 10:00."
         )
 
         if resultado_llamada.get("status") != "ok":
@@ -123,14 +132,15 @@ def receive_lead():
             }), 500
 
         # Guardar lead solo si la llamada fue exitosa
+        id_evento = lead_data.get("idEvento")
         nuevo_lead = Lead(
             id_evento=id_evento,
-            nombre_cliente=cliente.get("nome") or cliente.get("name"),
-            email=cliente.get("email"),
+            nombre_cliente=cliente_data.get("nome") or cliente_data.get("name"),
+            email=cliente_data.get("email") or (cliente_data.get("emails")[0] if cliente_data.get("emails") else None),
             telefono=telefono_formateado,
-            event_group=evento.get("eventGroup"),
-            event_type=evento.get("eventType"),
-            comentario=evento.get("comment")
+            event_group=evento_data.get("eventGroup"),
+            event_type=evento_data.get("eventType"),
+            comentario=evento_data.get("comment") or lead_data.get("observacao")
         )
 
         db.session.add(nuevo_lead)
