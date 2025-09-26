@@ -94,12 +94,21 @@ def receive_lead():
         id_evento = lead_data.get("idEvento")
         cliente = lead_data.get("cliente", {})
         evento = lead_data.get("event", {})
+        telefonos = cliente.get("phones", [])
+        telefono_formateado = None
 
+        if telefonos:
+           tel_obj = telefonos[0]  # toma el primer teléfono
+           ddi = tel_obj.get("ddi", "")
+           numero = tel_obj.get("numero", "")
+           if ddi and numero:
+              telefono_formateado = f"+{ddi}{numero}"
+        
         nuevo_lead = Lead(
             id_evento=id_evento,
             nombre_cliente=cliente.get("nome") or cliente.get("name"),
             email=cliente.get("email"),
-            telefono=cliente.get("ddiCel") or cliente.get("telefone"),
+            telefono=telefono_formateado,  # <--- aquí se asigna el teléfono correcto
             event_group=evento.get("eventGroup"),
             event_type=evento.get("eventType"),
             comentario=evento.get("comment")
@@ -162,4 +171,5 @@ def receive_lead():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
