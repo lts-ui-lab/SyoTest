@@ -3,6 +3,7 @@ import json
 import time
 import base64
 import requests
+import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -64,89 +65,40 @@ with app.app_context():
 # Función para llamar al lead vía Twilio
 def llamar_lead(numero_telefono, mensaje="Hola, esta es una confirmación de tu cita."):
     try:
-        print(f"Intentando llamar a: {numero_telefono}")
         call = twilio_client.calls.create(
             to=numero_telefono,
             from_=TWILIO_NUMBER,
             twiml=f'<Response><Say>{mensaje}</Say></Response>'
         )
-        print(f"Llamada realizada con SID: {call.sid}")
+        print(f"Llamada realizada a {numero_telefono}, SID: {call.sid}")
         return {"status": "ok", "sid": call.sid}
     except Exception as e:
-        print(f"Error al llamar: {str(e)}")
+        print(f"Error al llamar {numero_telefono}: {e}")
         return {"status": "error", "error": str(e)}
 
-# Webhook para recibir leads
-@app.route("/webhook/syonet/lead", methods=["POST"])
-def receive_lead():
-    try:
-        data = request.get_json(force=True)
-        print("Lead recibido crudo:", data)
-
-        # Manejo de JSON anidado
-        lead_data = data
-        if isinstance(data, dict) and len(data) == 1:
-            try:
-                raw_json = list(data.keys())[0]
-                lead_data = json.loads(raw_json)
-            except Exception:
-                lead_data = data
-
-        # Extraer cliente y evento desde resumoLead si existe
-        resumo_lead_str = lead_data.get("resumoLead")
-        if resumo_lead_str:
-            try:
-                resumo_lead = json.loads(resumo_lead_str)
-                cliente_data = resumo_lead.get("customer", {})
-                evento_data = resumo_lead.get("event", {})
-            except Exception:
-                cliente_data = {}
-                evento_data = {}
-        else:
-            cliente_data = lead_data.get("cliente", {})
-            evento_data = lead_data.get("event", {})
-
-        # Extraer teléfono
-        telefonos = cliente_data.get("phones", [])
-        telefono_formateado = None
-        if telefonos:
-            tel_obj = telefonos[0]
-            ddi = tel_obj.get("ddi", "")
-            numero = tel_obj.get("numero", "")
-            if ddi and numero:
-                telefono_formateado = f"+{ddi}{numero}"
-
-        if not telefono_formateado:
-            return jsonify({"msg": "No se proporcionó un teléfono válido"}), 400
-
-        # Llamada al lead vía Twilio **antes de agendar**
+# Función para procesar el lead en segundo plano
+def procesar_lead_async(nuevo_lead, id_evento):
+    # Llamada al lead
+    resultado_llamada = {"status": "no_number"}
+    if nuevo_lead.telefono:
         resultado_llamada = llamar_lead(
-            telefono_formateado,
-            mensaje=f"Hola {cliente_data.get('nome') or cliente_data.get('name')}, tu cita será agendada mañana a las 10:00."
+            nuevo_lead.telefono,
+            mensaje=f"Hola {nuevo_lead.nombre_cliente}, tu cita ha sido agendada para mañana a las 10:00."
         )
-
+        # Si falla la llamada, enviar WhatsApp
         if resultado_llamada.get("status") != "ok":
-            return jsonify({
-                "msg": "No se pudo realizar la llamada, no se agendó la cita",
-                "error": resultado_llamada.get("error")
-            }), 500
+            try:
+                msg = twilio_client.messages.create(
+                    body=f"Hola {nuevo_lead.nombre_cliente}, no pudimos llamarte. Tu cita ha sido agendada para mañana a las 10:00.",
+                    from_=TWILIO_NUMBER,
+                    to=nuevo_lead.telefono
+                )
+                print(f"WhatsApp enviado a {nuevo_lead.telefono}, SID: {msg.sid}")
+            except Exception as e:
+                print(f"Error enviando WhatsApp a {nuevo_lead.telefono}: {e}")
 
-        # Guardar lead solo si la llamada fue exitosa
-        id_evento = lead_data.get("idEvento")
-        nuevo_lead = Lead(
-            id_evento=id_evento,
-            nombre_cliente=cliente_data.get("nome") or cliente_data.get("name"),
-            email=cliente_data.get("email") or (cliente_data.get("emails")[0] if cliente_data.get("emails") else None),
-            telefono=telefono_formateado,
-            event_group=evento_data.get("eventGroup"),
-            event_type=evento_data.get("eventType"),
-            comentario=evento_data.get("comment") or lead_data.get("observacao")
-        )
-
-        db.session.add(nuevo_lead)
-        db.session.commit()
-
-        # Fecha de cita: mañana a las 10:00
+    # Agendar cita en Syonet
+    try:
         manana = datetime.now() + timedelta(days=1)
         fecha_cita = int(time.mktime(
             manana.replace(hour=10, minute=0, second=0, microsecond=0).timetuple()
@@ -160,34 +112,72 @@ def receive_lead():
             "testDrive": False
         }
 
-        # Llamada a la API de Syonet
+        r = requests.post(
+            f"{SYONET_BASE}/evento/{id_evento}/acao",
+            headers=AUTH_HEADER,
+            json=payload,
+            timeout=10
+        )
         try:
-            r = requests.post(
-                f"{SYONET_BASE}/evento/{id_evento}/acao",
-                headers=AUTH_HEADER,
-                json=payload,
-                timeout=10
-            )
-            try:
-                syonet_response = r.json()
-            except Exception:
-                syonet_response = {"status_code": r.status_code, "text": r.text}
-        except requests.RequestException as e:
-            syonet_response = {"error": str(e)}
+            syonet_response = r.json()
+        except Exception:
+            syonet_response = {"status_code": r.status_code, "text": r.text}
 
-        return jsonify({
-            "msg": "Lead recibido, llamada exitosa y cita agendada",
-            "lead": nuevo_lead.to_dict(),
-            "syonet_response": syonet_response,
-            "llamada": resultado_llamada
-        }), 200
+        print(f"Respuesta Syonet para lead {nuevo_lead.id}: {syonet_response}")
+    except Exception as e:
+        print(f"Error agendando cita en Syonet para lead {nuevo_lead.id}: {e}")
+
+
+@app.route("/webhook/syonet/lead", methods=["POST"])
+def receive_lead():
+    try:
+        data = request.get_json(force=True)
+        print("Lead recibido crudo:", data)
+
+        # Manejo de JSON anidado
+        lead_data = data
+        if isinstance(data, dict) and "resumoLead" in data:
+            try:
+                lead_data = json.loads(data["resumoLead"])
+            except Exception:
+                lead_data = data
+
+        cliente = lead_data.get("customer", {})
+        evento = lead_data.get("event", {})
+        telefonos = cliente.get("phones", [])
+        telefono_formateado = None
+        if telefonos:
+            tel_obj = telefonos[0]
+            ddi = tel_obj.get("ddi", "")
+            numero = tel_obj.get("numero", "")
+            if ddi and numero:
+                telefono_formateado = f"+{ddi}{numero}"
+
+        nuevo_lead = Lead(
+            id_evento=data.get("idEvento"),
+            nombre_cliente=cliente.get("nome") or cliente.get("name"),
+            email=cliente.get("emails", [None])[0],
+            telefono=telefono_formateado,
+            event_group=evento.get("eventGroup"),
+            event_type=evento.get("eventType"),
+            comentario=evento.get("comment")
+        )
+
+        db.session.add(nuevo_lead)
+        db.session.commit()
+
+        # Procesar el lead en segundo plano
+        threading.Thread(target=procesar_lead_async, args=(nuevo_lead, data.get("idEvento"))).start()
+
+        # RESPUESTA 200 OK inmediata
+        return jsonify({"msg": "Lead recibido"}), 200
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({
-            "msg": "Error al procesar el lead",
-            "error": str(e)
-        }), 500
+        print("Error procesando lead:", e)
+        # Siempre responder 200 OK a Syonet
+        return jsonify({"msg": "Error procesando lead"}), 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
