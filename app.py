@@ -1,30 +1,31 @@
+import os
 import json
 import time
+import base64
 import requests
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
-from sqlalchemy import or_
 
 app = Flask(__name__)
 
-# Configuración de SQLite (Render)
+# Configuración de SQLite
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///leads.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
-# Configuración Syonet
-SYONET_BASE = "https://demomex.syonet.com/api"
-   # Credenciales de Syonet
-        usuario = "RODRIGO.SANTIAGO"
-        password = "Syonet01#"
-        auth = base64.b64encode(f"{usuario}:{password}".encode()).decode()
+# Credenciales Syonet desde variables de entorno
+SYONET_BASE = os.getenv("SYONET_BASE", "https://demomex.syonet.com/api")
+SYONET_USER = os.getenv("SYONET_USER", "RODRIGO.SANTIAGO")
+SYONET_PASS = os.getenv("SYONET_PASS", "Syonet01#")
+
+auth = base64.b64encode(f"{SYONET_USER}:{SYONET_PASS}".encode()).decode()
 AUTH_HEADER = {
     "Content-Type": "application/json",
-    "Authorization": "Basic " + auth
+    "Authorization": f"Basic {auth}"
 }
 
-# Modelo de Lead
+# Modelo Lead
 class Lead(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     id_evento = db.Column(db.Integer, nullable=False)
@@ -53,20 +54,22 @@ class Lead(db.Model):
 with app.app_context():
     db.create_all()
 
-# Webhook para recibir leads desde Syonet
+# Webhook para recibir leads
 @app.route("/webhook/syonet/lead", methods=["POST"])
 def receive_lead():
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
 
-        # Caso: JSON anidado en clave
+        # Manejo de JSON anidado
+        lead_data = data
         if isinstance(data, dict) and len(data) == 1:
-            raw_json = list(data.keys())[0]
-            lead_data = json.loads(raw_json)
-        else:
-            lead_data = data
+            try:
+                raw_json = list(data.keys())[0]
+                lead_data = json.loads(raw_json)
+            except Exception:
+                lead_data = data  # fallback si no es JSON válido
 
-        print("Lead procesado:", lead_data)
+        print("Lead recibido:", lead_data)
 
         # Extraer datos importantes
         id_evento = lead_data.get("idEvento")
@@ -86,9 +89,11 @@ def receive_lead():
         db.session.add(nuevo_lead)
         db.session.commit()
 
-        # Programar cita automáticamente (ejemplo: mañana a las 10:00)
-        fecha_cita = int(time.mktime(datetime.strptime(
-            "2025-09-30 10:00", "%Y-%m-%d %H:%M").timetuple()) * 1000)
+        # Fecha de cita: mañana a las 10:00
+        manana = datetime.now() + timedelta(days=1)
+        fecha_cita = int(time.mktime(
+            manana.replace(hour=10, minute=0, second=0, microsecond=0).timetuple()
+        ) * 1000)
 
         payload = {
             "tipo": "VISITA LOJA",
@@ -98,55 +103,32 @@ def receive_lead():
             "testDrive": False
         }
 
-        r = requests.post(
-            f"{SYONET_BASE}/evento/{id_evento}/acao",
-            headers=AUTH_HEADER,
-            json=payload
-        )
+        try:
+            r = requests.post(
+                f"{SYONET_BASE}/evento/{id_evento}/acao",
+                headers=AUTH_HEADER,
+                json=payload,
+                timeout=10
+            )
+            try:
+                syonet_response = r.json()
+            except Exception:
+                syonet_response = {"status_code": r.status_code, "text": r.text}
+        except requests.RequestException as e:
+            syonet_response = {"error": str(e)}
 
         return jsonify({
             "msg": "Lead recibido, almacenado y cita agendada",
             "lead": nuevo_lead.to_dict(),
-            "syonet_response": r.json()
+            "syonet_response": syonet_response
         }), 200
 
     except Exception as e:
+        db.session.rollback()
         return jsonify({
             "msg": "Error al procesar el lead",
             "error": str(e)
         }), 500
-
-# Endpoint para listar leads
-@app.route("/leads", methods=["GET"])
-def list_leads():
-    leads = Lead.query.order_by(Lead.fecha_recepcion.desc()).all()
-    return jsonify([lead.to_dict() for lead in leads]), 200
-
-# Endpoint de búsqueda flexible
-@app.route("/leads/search", methods=["GET"])
-def search_leads():
-    nombre = request.args.get("nombre")
-    telefono = request.args.get("telefono")
-    email = request.args.get("email")
-    id_evento = request.args.get("id_evento")
-
-    query = Lead.query
-
-    if id_evento:
-        query = query.filter(Lead.id_evento == id_evento)
-    if nombre:
-        query = query.filter(Lead.nombre_cliente.ilike(f"%{nombre}%"))
-    if telefono:
-        query = query.filter(Lead.telefono.ilike(f"%{telefono}%"))
-    if email:
-        query = query.filter(Lead.email.ilike(f"%{email}%"))
-
-    results = query.order_by(Lead.fecha_recepcion.desc()).all()
-
-    if not results:
-        return jsonify({"msg": "No se encontraron leads con esos criterios"}), 404
-
-    return jsonify([lead.to_dict() for lead in results]), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
